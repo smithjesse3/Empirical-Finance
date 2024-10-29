@@ -1,0 +1,634 @@
+---
+title: "HW 2 5200 Group"
+author: "Jesse Smith, Lianne Chin, Qianyun Liu, Tianfeng Wang"
+format: html
+execute:
+  echo: false
+---
+
+# Set Up: Downloading, cleaning and filtering the data
+
+```{r warning = FALSE, message = FALSE}
+library(tidyquant)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(lubridate)
+library(frenchdata)
+library(sandwich)
+library(lmtest)
+symbols <- tq_index("DOW") |> 
+  filter(company != "US DOLLAR")
+symbols
+# download the data
+#| cache: true
+index_prices <- tq_get(symbols,
+  get = "stock.prices",
+  from = "1999-12-31",
+  to = "2024-09-30"
+)
+```
+
+## Calculating average daily average returns/volatility over the full dataset
+
+```{r warning = FALSE, message = FALSE}
+all_returns <- index_prices |>
+  group_by(symbol) |>
+  mutate(ret = adjusted / lag(adjusted) - 1) |>
+  select(symbol, date, ret) |>
+  drop_na(ret)
+all_returns |>
+  summarize(across(
+    ret,
+    list(
+      daily_mean = mean,
+      daily_sd = sd,
+      daily_min = min,
+      daily_max = max
+    )
+  ))
+```
+
+## Calculating the average of the average monthly returns over the full dataset
+
+```{r warning = FALSE, message = FALSE}
+monthly_stats <- index_prices |>
+  mutate(month = floor_date(date, "month")) |>
+  group_by(symbol, month) |>
+  summarize(price = last(adjusted), .groups = "drop_last") |>
+  mutate(ret = price / lag(price) - 1) |>
+  drop_na(ret) |>
+  group_by(symbol) |>
+  summarize(
+    avgret_monthly_mean = mean(ret),
+    avgret_monthly_sd = sd(ret)
+  )
+print(monthly_stats)
+```
+
+## Calculating monthly average returns/std for review over FULL dataset
+
+```{r warning = FALSE, message = FALSE}
+returns <- index_prices |>
+  mutate(month = floor_date(date, "month")) |>
+  group_by(symbol, month) |>
+  summarize(price = last(adjusted), .groups = "drop_last") |>
+  mutate(ret = price / lag(price) - 1) |>
+  drop_na(ret) |>
+  select(-price)
+print(returns)
+```
+
+## Filtering for full history
+
+```{r warning = FALSE, message = FALSE}
+actual_trading_days <- index_prices |> 
+  pull(date) |> 
+  unique() |> 
+  length() # this is different
+stocks_with_full_data <- index_prices |> 
+  group_by(symbol) |> 
+  summarize(n_unique_dates = n_distinct(date)) |> 
+  filter(n_unique_dates == actual_trading_days) |> 
+  pull(symbol)
+filtered_prices <- index_prices |> 
+  filter(symbol %in% stocks_with_full_data)
+print(stocks_with_full_data)
+```
+
+## Stocks that didn't make the cut: DOW, WBA (walgreens), CRM (salesforce) and V (visa) - this seems to track, they weren't added pre-2000.
+
+# Problem A.
+
+## MVP of 2000 to 2022
+
+```{r warning = FALSE, message = FALSE}
+monthly_returns_20to22 <- returns |> 
+  filter(month >= "2000-01-01" & month <= "2022-12-31", symbol %in% stocks_with_full_data) |>  
+  pivot_wider(
+    id_cols = month, 
+    names_from = symbol, 
+    values_from = ret
+  ) |> 
+  drop_na()
+# print(monthly_returns_20to22)
+monthly_returns_20to22 <- monthly_returns_20to22 |> 
+  select(-month) |>   
+  as.matrix()
+# print(monthly_returns_20to22)
+sigma <- cov(monthly_returns_20to22)
+# print(sigma)
+mu <- colMeans(monthly_returns_20to22)
+#print(colnames(returns_matrix)) ran in to error with this line so replaced it with below line
+# print(colnames(monthly_returns_20to22))
+N <- ncol(monthly_returns_20to22)
+vector_ones <- rep(1, N)
+sigma_inv <- solve(sigma)
+raw_mvp_weights <- sigma_inv %*% vector_ones
+mvp_weights_a <- raw_mvp_weights / sum(raw_mvp_weights)
+# print(mvp_weights_a)
+tibble(
+  average_ret2000to2022 = as.numeric(t(mvp_weights_a) %*% mu),
+  volatility2000to2022 = as.numeric(sqrt(t(mvp_weights_a) %*% sigma %*% mvp_weights_a))
+)
+```
+
+## Applying these weights to 2023 onward
+
+```{r}
+monthly_returns_2023 <- returns |> 
+  filter(month >= "2023-01-01", symbol %in% stocks_with_full_data) |>  
+  pivot_wider(
+    id_cols = month, 
+    names_from = symbol, 
+    values_from = ret
+  )
+# print(monthly_returns_2023)
+
+monthly_returns_2023_matrix <- monthly_returns_2023 |> 
+  select(-month) |> 
+  as.matrix()  
+average_ret_2023 <- as.numeric(t(mvp_weights_a) %*% colMeans(monthly_returns_2023_matrix, na.rm = TRUE))
+portfolio_volatility_2023 <- as.numeric(
+  sqrt(t(mvp_weights_a) %*% cov(monthly_returns_2023_matrix, use = "complete.obs") %*% mvp_weights_a)
+)
+tibble(
+  average_ret_2023onward = average_ret_2023,
+  volatility_2023onward = portfolio_volatility_2023
+)
+```
+
+## Yearly return from 2000 to 2022 is: 8.4% and 2023 onward is 14.6%. Stocks with low and steady volatility in 2000-2022 were favored in the MVP portfolio. Those same stocks performed very well in 2023 onward. 
+
+# Checking our results using a function:
+
+```{r warning = FALSE, message = FALSE}
+monthly_returns_2023 <- returns |> 
+  filter(month >= "2023-01-01", symbol %in% stocks_with_full_data) |>  
+  pivot_wider(
+    id_cols = month, 
+    names_from = symbol, 
+    values_from = ret
+  ) |> 
+  drop_na()
+# print(monthly_returns_2023)
+monthly_returns_2023_matrix <- monthly_returns_2023 |> 
+  select(-month) |> 
+  as.matrix()  
+apply_out_of_sample <- function(future_matrix, mvp_weights_a) {
+  average_ret <- as.numeric(t(mvp_weights_a) %*% colMeans(future_matrix, na.rm = TRUE))
+  portfolio_volatility <- as.numeric(
+    sqrt(t(mvp_weights_a) %*% cov(future_matrix, use = "complete.obs") %*% mvp_weights_a)
+  )
+  return(tibble(
+    average_ret_onward = average_ret,
+    volatility_onward = portfolio_volatility
+  ))
+}
+apply_out_of_sample(monthly_returns_2023_matrix, mvp_weights_a)
+```
+
+# Problem B
+
+```{r warning = FALSE, message = FALSE}
+returns_matrix_2000_2022 <- returns |>
+  filter(symbol %in% stocks_with_full_data) |>  
+  filter(month <= as.Date("2022-12-31")) |> 
+  pivot_wider(id_cols = month, names_from = symbol, values_from = ret) |>
+  drop_na() |>
+  select(-month)
+# print("Filtered returns matrix (2000-2022):")
+# print(returns_matrix_2000_2022)
+sigma_2000_2022 <- cov(as.matrix(returns_matrix_2000_2022))  
+mu_2000_2022 <- colMeans(as.matrix(returns_matrix_2000_2022)) 
+# print("Dimensions of matrix (2000-2022):")
+# dim(sigma_2000_2022) 
+# print("Mean returns for each stock  (2000-2022):")
+# print(mu_2000_2022)
+mu_bar <- 0.015
+N <- ncol(returns_matrix_2000_2022)  
+vector_ones <- rep(1, N)  
+sigma_inv_2000_2022 <- solve(sigma_2000_2022)  
+C <- as.numeric(t(vector_ones) %*% sigma_inv_2000_2022 %*% vector_ones)
+D <- as.numeric(t(vector_ones) %*% sigma_inv_2000_2022 %*% mu_2000_2022)
+E <- as.numeric(t(mu_2000_2022) %*% sigma_inv_2000_2022 %*% mu_2000_2022)
+# print(paste("C:", C, "D:", D, "E:", E))
+
+lambda_tilde <- as.numeric(2 * (mu_bar - D / C) / (E - D^2 / C))
+# print(paste("Lambda_tilde:", lambda_tilde))
+
+mvp_weights_b <- sigma_inv_2000_2022 %*% vector_ones / C
+efp_weights <- mvp_weights_b + lambda_tilde / 2 * (sigma_inv_2000_2022 %*% mu_2000_2022 - D * mvp_weights_b)
+
+portfolio_returns_2000_2022 <- as.numeric(as.matrix(returns_matrix_2000_2022) %*% efp_weights)
+portfolio_avg_return_2000_2022 <- mean(portfolio_returns_2000_2022)
+portfolio_sd_2000_2022 <- sd(portfolio_returns_2000_2022)
+
+print(paste("Average return (2000-2022):", round(portfolio_avg_return_2000_2022, 9)))
+print(paste("Portfolio standard deviation (2000-2022):", round(portfolio_sd_2000_2022, 9)))
+# print("Filtering 2023-2024 data for common symbols...")
+
+returns_matrix_2023_2024 <- returns |> 
+  filter(month >= as.Date("2023-01-01")) |>
+  pivot_wider(id_cols = month, names_from = symbol, values_from = ret) |>
+  drop_na()
+
+common_symbols <- intersect(colnames(returns_matrix_2000_2022), colnames(returns_matrix_2023_2024))
+
+returns_matrix_2023_2024 <- returns_matrix_2023_2024 |> 
+  select(all_of(common_symbols))
+
+# For 2023 onward
+
+returns_matrix_2023_2024 <- returns |> 
+  filter(symbol %in% common_symbols) |> 
+  filter(month >= as.Date("2023-01-01")) |>
+  pivot_wider(id_cols = month, names_from = symbol, values_from = ret) |>
+  drop_na() |>
+  select(all_of(common_symbols)) |>
+  as.matrix()
+
+# print("Filtered returns matrix (2023-2024):")
+# print(returns_matrix_2023_2024)
+
+returns_matrix_2023_2024 <- as.matrix(returns_matrix_2023_2024)
+
+# Function check using data from A (this is duplicative)
+# apply_out_of_sample(monthly_returns_2023_matrix, efp_weights)
+
+portfolio_returns_2023_2024 <- as.numeric(returns_matrix_2023_2024 %*% efp_weights)
+portfolio_avg_return_2023_2024 <- mean(portfolio_returns_2023_2024)
+portfolio_sd_2023_2024 <- sd(portfolio_returns_2023_2024)
+
+print(paste("Average return (2023-2024):", round(portfolio_avg_return_2023_2024, 9)))
+print(paste("Portfolio standard deviation (2023-2024):", round(portfolio_sd_2023_2024, 9)))
+```
+
+## Yearly return from 2000 to 2022 is: 18% and 2023 onward is ~12%. These results puzzled us. Given the results in problem A, we expected the 2023 onward results to have a higher volatility and a higher avg. return. This did not happen. It appears that stocks meeting the high 0.015 target return with low and steady volatility in 2000-2022 were not favored in the MVP portfolio for 2023 onward. Perhaps inadvertently the market conditions were better set up for the MVP of stocks in (a) than the new portfolio attempting to achieve target returns of 0.015. We think this is because we are training on 2000-2022 then testing out of sample so as we know market conditions are ever changing and perhaps this led us to results that did not agree with out initial intuition.
+
+# Problem C
+
+```{r warning = FALSE, message = FALSE}
+filtered_companies <- c("AAPL", "AMGN", "AMZN", "AXP", "BA", "CAT", "CSCO", "CVX", "DIS", "GS", 
+                        "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KO", "MCD", "MMM", "MRK", 
+                        "MSFT", "NKE", "PG", "TRV", "UNH", "VZ", "WMT")
+ff3 <- download_french_data("Fama/French 3 Factors")
+ff3_data <- ff3$subsets$data[[1]] |>
+  mutate(date = floor_date(ymd(paste(date, "01", sep = "")), "month"),  
+         rf = as.numeric(RF) / 100) |>  
+  filter(date >= "2000-01-01" & date <= "2022-12-31") |>  
+  select(date, rf)  
+
+# print(ff3_data)
+
+start_date <- min(ff3_data$date)
+end_date <- max(ff3_data$date)
+# cat("Risk-Free Rate Data from", as.character(start_date), "to", as.character(end_date), "\n")
+average_rf <- mean(ff3_data$rf, na.rm = TRUE)
+# cat("Average Risk-Free Rate 2000 to 2022:", average_rf, "\n")
+
+mean_monthly_returns <- returns |>
+  filter(symbol %in% filtered_companies) |>  
+  filter(month >= "2000-01-01" & month <= "2022-12-31") |>  
+  group_by(symbol, month) |>  
+  summarize(monthly_mean_ret = mean(ret, na.rm = TRUE)) |>  
+  pivot_wider(
+    id_cols = month,
+    names_from = symbol,
+    values_from = monthly_mean_ret
+  ) |>  
+  drop_na()  
+# print(mean_monthly_returns)
+mean_returns <- colMeans(mean_monthly_returns[,-1], na.rm = TRUE)
+
+mean_returns_excess <- mean_returns - average_rf
+# print(mean_returns_excess)
+
+sigma_inv <- solve(sigma)  
+sharpe_weights_numerator <- sigma_inv %*% mean_returns_excess 
+sharpe_weights_denominator <- sum(sharpe_weights_numerator)
+sharpe_weights <- sharpe_weights_numerator / sharpe_weights_denominator  
+
+# print(sharpe_weights)
+
+stock_names <- colnames(returns_matrix_2000_2022) #got error here when i tried to run so changed "returns_matrix" to "returns_matrix_2000_2022" unsure if this is what variable was meant
+optimal_portfolio <- data.frame(
+  Stock = stock_names,
+  Weight = sharpe_weights  
+)
+# print("Optimal portfolio (stocks and weights):")
+# print(optimal_portfolio)
+
+average_portfolio_return <- as.numeric(t(sharpe_weights) %*% mean_returns)  
+portfolio_volatility <- as.numeric(sqrt(t(sharpe_weights) %*% sigma %*% sharpe_weights))  
+
+sharpe_ratio <- (average_portfolio_return - average_rf) / portfolio_volatility
+# print("Performance metrics for the highest Sharpe ratio portfolio (up to end of 2022):")
+print(tibble(
+  average_portfolio_return = average_portfolio_return,
+  portfolio_volatility = portfolio_volatility,
+  sharpe_ratio = sharpe_ratio
+))
+```
+
+```{r warning = FALSE, message = FALSE}
+ff3_data_2023 <- ff3$subsets$data[[1]] |>
+  mutate(date = floor_date(ymd(paste(date, "01", sep = "")), "month"), 
+         rf = as.numeric(RF) / 100) |>  
+  filter(date >= "2023-01-01") |>  
+  select(date, rf)
+
+# print (ff3_data_2023)
+
+start_date <- min(ff3_data_2023$date)
+end_date <- max(ff3_data_2023$date)
+# cat("Risk-Free Rate Data is available from", as.character(start_date), "to", as.character(end_date), "\n")
+
+rf_2023 <- ff3_data_2023$rf
+# cat("Monthly risk-free rates for 2023-present:\n")
+# print(rf_2023)
+
+average_rf_2023 <- mean(rf_2023, na.rm = TRUE)
+# cat("Average Risk-Free Rate for 2023-present:", average_rf_2023, "\n")
+
+numeric_monthly_returns_2023 <- monthly_returns_2023[,-1] 
+monthly_excess_returns <- colMeans(numeric_monthly_returns_2023, na.rm = TRUE) - average_rf_2023
+# cat("Average Monthly Excess Returns (2023-present):\n")
+# print(monthly_excess_returns)
+
+portfolio_volatility_2023 <- as.numeric(sqrt(t(sharpe_weights) %*% cov(numeric_monthly_returns_2023) %*% sharpe_weights)) 
+sharpe_ratio_2023 <- mean(monthly_excess_returns) / portfolio_volatility_2023
+
+print(tibble(
+  average_ret_2023 = mean(monthly_excess_returns),
+  portfolio_volatility_2023 = portfolio_volatility_2023,
+  sharpe_ratio_2023 = sharpe_ratio_2023
+))
+
+```
+## The Sharpe ratio measures the risk-adjusted return. Yearly return from 2000 to 2022 is: 32.6% with annual volatility of 22.6% and a sharpe ratio of 1.444. 2023 onward is 12.4% yearly return with an annual volatility of 15.8% and a Sharpe ratio of 0.789. We are suspicious about our results, including the high Sharpe ratio for 2000 to 2022 indicating the portfolio is outperforming given the risk taken. These same weights applied to 2023 onward are much lower, and appear more reasonable based on our responses for A&B. The difference between 2000 to 2022 and 2023 onward is likely due to differing market conditions. 
+
+# Problem D
+
+```{r warning = FALSE, message = FALSE}
+# monthly returns 2023 onward
+monthly_returns_2023 <- returns %>%
+  filter(month >= as.Date("2023-01-01"), symbol %in% stocks_with_full_data) %>%
+  pivot_wider(names_from = symbol, values_from = ret)
+# calc equal weight portfolio returns method used: rowMeans
+monthly_returns_2023 <- monthly_returns_2023 %>%
+  mutate(portfolio_return = rowMeans(select(., -month), na.rm = TRUE))
+rf_2023 <- ff3_data_2023$rf  #rf rates
+# merge rf into month returns for calc excess return
+monthly_returns_2023 <- monthly_returns_2023 %>%
+  mutate(excess_portfolio_return = portfolio_return - rf_2023 / 100)
+ 
+# avg, std deviation, and sharpe ratio
+#avg
+average_return <- mean(monthly_returns_2023$portfolio_return, na.rm = TRUE)
+#std dev
+std_dev <- sd(monthly_returns_2023$portfolio_return, na.rm = TRUE)
+#calc excess for sharpe
+monthly_returns_2023 <- monthly_returns_2023 %>%
+  mutate(excess_portfolio_return = portfolio_return - rf_2023 / 100)
+#sharpe
+average_excess_return <- mean(monthly_returns_2023$excess_portfolio_return, na.rm = TRUE)
+std_dev_excess <- sd(monthly_returns_2023$excess_portfolio_return, na.rm = TRUE)
+sharpe_ratio <- average_excess_return / std_dev_excess
+ 
+print(tibble(
+  average_return = average_return,
+  standard_deviation = std_dev,
+  sharpe_ratio = sharpe_ratio
+))
+```
+
+# Problem E
+
+## We performed a two-sample t-test on the average monthly returns of these four portfolios from 2023 to present.
+## Null hypothesis: the difference in the average monthly returns is 0.
+
+```{r warning = FALSE, message = FALSE}
+# the monthly returns of the minimum variance portfolio in 2023
+portfolio_returns_mvp_2023 <- monthly_returns_2023_matrix %*% mvp_weights_a
+# the monthly returns of the target return portfolio in 2023
+portfolio_returns_target_2023 <- monthly_returns_2023_matrix %*% efp_weights
+# the monthly returns of the maximum Sharpe ratio portfolio in 2023
+portfolio_ret_sharpe_2023 <- monthly_returns_2023_matrix %*% sharpe_weights
+# the monthly returns of the equal-weighted portfolio in 2023
+N <- ncol(monthly_returns_2023_matrix)  # stocks from 2023 to date
+equal_weights <- rep(1 / N, N)  # equal weighting of each stock
+portfolio_returns_equal_2023 <- monthly_returns_2023_matrix %*% equal_weights
+```
+
+```{r warning = FALSE, message = FALSE}
+# a) Minimum variance portfolio vs b) portfolio that achieves 1.5% target return
+t_test_ab <- t.test(portfolio_returns_mvp_2023, portfolio_returns_target_2023)
+print(t_test_ab)
+# a) Minimum variance portfolio vs c) Maximum Sharpe ratio portfolio
+t_test_ac <- t.test(portfolio_returns_mvp_2023, portfolio_ret_sharpe_2023)
+print(t_test_ac)
+# a) Minimum variance portfolio vs d) Equal weight portfolio
+t_test_ad <- t.test(portfolio_returns_mvp_2023, portfolio_returns_equal_2023)
+print(t_test_ad)
+# b) Portfolio that achieves 1.5% target return vs c) Maximum Sharpe ratio portfolio
+t_test_bc <- t.test(portfolio_returns_target_2023, portfolio_ret_sharpe_2023)
+print(t_test_bc)
+# b) 1.5% target return portfolio vs d) equal weight portfolio
+t_test_bd <- t.test(portfolio_returns_target_2023, portfolio_returns_equal_2023)
+print(t_test_bd)
+# c) Maximum Sharpe ratio portfolio vs d) equal weight portfolio
+t_test_cd <- t.test(portfolio_ret_sharpe_2023, portfolio_returns_equal_2023)
+print(t_test_cd)
+```
+
+## Across all six comparisons, the p-values are high (all > 0.05), and the confidence intervals for the differences in means all include zero. Therefore, we cannot reject the null hypothesis in any of the cases. This suggests that the mean returns of these portfolios are not statistically different from each other based on the data from January 2023 to present.
+## This result might indicate that, despite different optimization strategies (e.g., MVP, target return, Sharpe ratio, equally weighted), the portfolios yielded similar mean returns in this time period. In practice, this could be due to various market conditions that affected all portfolios similarly, despite their theoretical differences in risk and return trade-offs.
+## However, considering that the time period from 2023 to present is relatively short, the difference in the results of the portfolio strategies is not obvious. We consider using the results obtained over a longer time period for a t-test.
+
+```{r warning = FALSE, message = FALSE}
+
+library(sandwich)
+library(lmtest)
+
+# a) Minimum Variance Portfolio vs b) Portfolio that achieves 1.5% target return
+
+return_diff_ab <- portfolio_returns_mvp_2023 - portfolio_returns_target_2023
+# linear model for the difference in returns
+model_ab <- lm(return_diff_ab ~ 1)  # ~1 for testing mean difference
+# this is Newey-West standard errors with lag adjustment
+newey_west_se_ab <- coeftest(model_ab, vcov = NeweyWest(model_ab, lag = 1, prewhite = FALSE))
+print("Newey-West adjusted t-test: MVP vs Target Return Portfolio")
+print(newey_west_se_ab)
+
+# a) Minimum Variance Portfolio vs c) Maximum Sharpe Ratio Portfolio
+return_diff_ac <- portfolio_returns_mvp_2023 - portfolio_ret_sharpe_2023
+model_ac <- lm(return_diff_ac ~ 1)
+newey_west_se_ac <- coeftest(model_ac, vcov = NeweyWest(model_ac, lag = 1, prewhite = FALSE))
+print("Newey-West adjusted t-test: MVP vs Maximum Sharpe Ratio Portfolio")
+print(newey_west_se_ac)
+
+# a) Minimum Variance Portfolio vs d) Equal Weight Portfolio
+return_diff_ad <- portfolio_returns_mvp_2023 - portfolio_returns_equal_2023
+model_ad <- lm(return_diff_ad ~ 1)
+newey_west_se_ad <- coeftest(model_ad, vcov = NeweyWest(model_ad, lag = 1, prewhite = FALSE))
+print("Newey-West adjusted t-test: MVP vs Equal Weight Portfolio")
+print(newey_west_se_ad)
+
+# b) Portfolio that achieves 1.5% target return vs c) Maximum Sharpe Ratio Portfolio
+return_diff_bc <- portfolio_returns_target_2023 - portfolio_ret_sharpe_2023
+model_bc <- lm(return_diff_bc ~ 1)
+newey_west_se_bc <- coeftest(model_bc, vcov = NeweyWest(model_bc, lag = 1, prewhite = FALSE))
+print("Newey-West adjusted t-test: Target Return Portfolio vs Maximum Sharpe Ratio Portfolio")
+print(newey_west_se_bc)
+
+# b) Portfolio that achieves 1.5% target return vs d) Equal Weight Portfolio
+return_diff_bd <- portfolio_returns_target_2023 - portfolio_returns_equal_2023
+model_bd <- lm(return_diff_bd ~ 1)
+newey_west_se_bd <- coeftest(model_bd, vcov = NeweyWest(model_bd, lag = 1, prewhite = FALSE))
+print("Newey-West adjusted t-test: Target Return Portfolio vs Equal Weight Portfolio")
+print(newey_west_se_bd)
+
+# c) Maximum Sharpe Ratio Portfolio vs d) Equal Weight Portfolio
+return_diff_cd <- portfolio_ret_sharpe_2023 - portfolio_returns_equal_2023
+model_cd <- lm(return_diff_cd ~ 1)
+newey_west_se_cd <- coeftest(model_cd, vcov = NeweyWest(model_cd, lag = 1, prewhite = FALSE))
+print("Newey-West adjusted t-test: Maximum Sharpe Ratio Portfolio vs Equal Weight Portfolio")
+print(newey_west_se_cd)
+
+```
+
+## Above are the same t-tests as above, but with Newey-West adjusted t-tests for each test set. We find that the results show that the NeweyWest hovered around the same t-values and p-values among tests. There still appears to be no signficant difference. The standard errors were higher in Newey-West because of the autocorrelation issue. 
+
+
+## We performed a two-sample t-test again on the average monthly returns of these four portfolios from 2000 to 2022.
+## Null hypothesis: the difference in the average monthly returns is 0.
+
+```{r warning = FALSE, message = FALSE}
+# the monthly returns of the minimum variance portfolio in 2023
+portfolio_returns_mvp_20to22 <- monthly_returns_20to22 %*% mvp_weights_a
+# the monthly returns of the target return portfolio in 2023
+portfolio_returns_target_20to22 <- monthly_returns_20to22 %*% efp_weights
+# the monthly returns of the maximum Sharpe ratio portfolio in 2023
+portfolio_ret_sharpe_20to22 <- monthly_returns_20to22 %*% sharpe_weights
+# the monthly returns of the equal-weighted portfolio in 2023
+portfolio_returns_equal_20to22 <- monthly_returns_20to22 %*% equal_weights
+
+# a) Minimum variance portfolio vs b) portfolio that achieves 1.5% target return
+t_test_ab <- t.test(portfolio_returns_mvp_20to22, portfolio_returns_target_20to22)
+print(t_test_ab)
+# a) Minimum variance portfolio vs c) Maximum Sharpe ratio portfolio
+t_test_ac <- t.test(portfolio_returns_mvp_20to22, portfolio_ret_sharpe_20to22)
+print(t_test_ac)
+# a) Minimum variance portfolio vs d) Equal weight portfolio
+t_test_ad <- t.test(portfolio_returns_mvp_20to22, portfolio_returns_equal_20to22)
+print(t_test_ad)
+# b) Portfolio that achieves 1.5% target return vs c) Maximum Sharpe ratio portfolio
+t_test_bc <- t.test(portfolio_returns_target_20to22, portfolio_ret_sharpe_20to22)
+print(t_test_bc)
+# b) 1.5% target return portfolio vs d) equal weight portfolio
+t_test_bd <- t.test(portfolio_returns_target_20to22, portfolio_returns_equal_20to22)
+print(t_test_bd)
+# c) Maximum Sharpe ratio portfolio vs d) equal weight portfolio
+t_test_cd <- t.test(portfolio_ret_sharpe_20to22, portfolio_returns_equal_20to22)
+print(t_test_cd)
+```
+
+## The Sharpe Ratio Portfolio outperformed all other portfolios from 2000 to 2022, with significantly higher mean returns compared to the MVP, Target Return Portfolio, and Equally Weighted Portfolio. The Equally Weighted Portfolio and MVP had similar returns, with no statistically significant difference between them. The Target Return Portfolio had a higher mean return than the MVP but was significantly outperformed by the Sharpe Ratio Portfolio. Therefore, we should reject the null hypothesis.
+
+## The differences in performance between 2000-2022 and 2023-present might also reflect different periods in the market cycle. Between 2000-2022, there were multiple major downturns: Dot-com bubble (early 2000s), Global Financial Crisis (2008) and COVID-19 pandemic (2020). In contrast, 2023-present might be a relatively calm period with fewer shocks, leading to smaller performance differences across portfolios.
+## Although strategy may matter less for short-term returns, long-term diversification and risk management remain important.
+
+
+
+#Problem F: Redoing Problem A
+
+```{r warning = FALSE, message = FALSE}
+# (a 2000-2022 mvp)
+library(quadprog)
+N <- ncol(monthly_returns_20to22)  #num of stocks
+Dmat <- sigma  #cov matrix
+dvec <- rep(0, N)  #zero vector since minimizing variance without concern for returns
+# constraint for matrix a and vector b
+Amat <- t(rbind(1, diag(N)))  #first row 1's rest identity matrix (no-short selling)
+bvec <- c(1, rep(0, N))  #sum of weights 1 all weights >= 0
+# solve the problem
+result_a <- solve.QP(Dmat = Dmat, dvec = dvec, Amat = Amat, bvec = bvec, meq = 1)
+# extract port weights
+mvp_weights_a <- result_a$solution
+#check the weights
+# print(mvp_weights_a)
+
+#calc ret and vol
+average_ret_a <- as.numeric(t(mvp_weights_a) %*% mu)
+volatility_a <- sqrt(t(mvp_weights_a) %*% sigma %*% mvp_weights_a)
+
+tibble(
+  average_return_a = average_ret_a,
+  volatility_a = volatility_a
+)
+```
+
+## These results are slightly different than Problem A where avg return: 0.007522034 and volatility was 0.03210922.
+
+```{r warning = FALSE, message = FALSE}
+#(a 2023 onward mvp, result at end with b)
+# mean returns 2023 onward
+mu_2023 <- colMeans(monthly_returns_2023_matrix, na.rm = TRUE)
+# cov matrix 2023 onward
+sigma_2023 <- cov(monthly_returns_2023_matrix, use = "complete.obs")
+
+# 2023 onward performance out of sample
+# apply weights
+average_ret_2023_a <- as.numeric(t(mvp_weights_a) %*% mu_2023)
+volatility_2023_a <- sqrt(t(mvp_weights_a) %*% sigma_2023 %*% mvp_weights_a)
+
+out_of_sample_a <- tibble(
+  portfolio = "Part (a) - MVP without Short Selling",
+  average_return_2023onward = average_ret_2023_a,
+  volatility_2023onward = volatility_2023_a
+)
+```
+
+#Problem F: Redoing Problem B
+
+```{r warning = FALSE, message = FALSE}
+#(b 2000-2022 target)
+target_return <- 0.015
+Amat_b <- cbind(1, mu, diag(N))  # add mu (mean returns) as the second row for the return constraint
+bvec_b <- c(1, target_return, rep(0, N))  # target return, no short selling
+# solve the problem
+result_b <- solve.QP(Dmat = Dmat, dvec = dvec, Amat = Amat_b, bvec = bvec_b, meq = 2)  # meq = 2: two equality constraints
+# extract port weights
+mvp_weights_b <- result_b$solution
+# check weights
+# print(mvp_weights_b)
+
+# calc ret and vol
+average_ret_b <- as.numeric(t(mvp_weights_b) %*% mu)
+volatility_b <- sqrt(t(mvp_weights_b) %*% sigma %*% mvp_weights_b)
+
+tibble(
+  average_return_b = average_ret_b,
+  volatility_b = volatility_b
+)
+
+```
+## These results are slightly different than Problem B where avg return: 0.015 and volatility was 0.038695636. In the case of short-selling for 2000 - 2022, the volatility increased. 
+
+```{r}
+#(b 2023 onward target )
+# apply weights
+average_ret_2023_b <- as.numeric(t(mvp_weights_b) %*% mu_2023)
+volatility_2023_b <- sqrt(t(mvp_weights_b) %*% sigma_2023 %*% mvp_weights_b)
+
+out_of_sample_b <- tibble(
+  portfolio = "Part (b) - MVP with Target Return",
+  average_return_2023onward = average_ret_2023_b,
+  volatility_2023onward = volatility_2023_b
+)
+out_of_sample_performance <- bind_rows(out_of_sample_a, out_of_sample_b)
+print(out_of_sample_performance)
+```
+
+## Problem A&B returns for 2023 onward are similar. 

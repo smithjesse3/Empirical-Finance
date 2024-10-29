@@ -1,0 +1,334 @@
+---
+title: "5200HW1"
+author: "Jesse Smith, Lianne Chin, Qianyun Liu, Tianfeng Wang"
+date: "2024-10-02"
+output:
+  pdf_document: default
+  html_document: default
+
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+# tinytex::tlmgr_install("bookmark")
+# tinytex::install_tinytex()
+#tinytex::reinstall_tinytex(repository = "illinois")
+```
+
+a. Extracts data for SP500 return index from YFinance up to 12/31/2023, only selecting the closing prices of last day of each month 
+```{r, warning=FALSE, message=FALSE}
+rm(list=ls())
+library(tidyverse)
+library(tidyquant)
+library(dplyr)
+library(lubridate)
+
+sp500_tr_index <- tq_get("^SP500TR", get = "stock.prices",
+  from = "1988-01-04", to = "2023-12-31") |>
+    select(date, tr_index = close)
+  
+monthly_sp500_tr_index <- sp500_tr_index |>
+    mutate(year = year(date), month = month(date)) |>
+    group_by(year, month) |> 
+    filter(date == max(date)) |>
+    ungroup() |>
+    select(-year, -month) |>
+    drop_na()
+
+head(monthly_sp500_tr_index)
+```
+
+b. Downloads Shiller data, converts P and D to numeric values, formats dates
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(stringr)
+aux <- tempfile(fileext = ".xls")
+download.file(url = "http://www.econ.yale.edu/~shiller/data/ie_data.xls",
+                 destfile = aux, mode='wb')
+rshiller_raw <- read_excel(aux, sheet = "Data", skip = 7)
+
+rshiller <- rshiller_raw |>
+  mutate(P = as.numeric(P),
+         D = as.numeric(D),
+         Date = format(Date, nsmall = 2),
+         Date = str_replace(Date, "\\.", "-"),
+         Date = ceiling_date(ym(Date), "month") - days(1)) |>
+  rename(date = Date)
+
+head(rshiller)
+```
+
+c. Calculates monthly total return using Shiller data
+```{r, warning=FALSE, message=FALSE}
+rshiller <- rshiller |>
+  mutate(monthly_D = D/12,
+         monthly_tr = (P + monthly_D) / lag(P) - 1)
+
+head(rshiller)
+```
+
+d-1. Calculates cumulative returns since 1988 using Shiller data
+```{r, warning=FALSE, message=FALSE}
+rshiller_1988 <- rshiller |>
+  filter(date >= "1988-01-01") |>
+  mutate(cum_tr = cumprod(1 + monthly_tr) - 1,
+         year_month = floor_date(date, "month")) |>
+  select(date, year_month, monthly_tr, cum_tr)
+
+head(rshiller_1988)
+```
+
+d-2. Calculates cumulative returns using Yahoo Finance tr index data
+```{r, warning=FALSE, message=FALSE}
+monthly_sp500_tr_index <- monthly_sp500_tr_index |>
+  mutate(year_month = floor_date(date, "month"),
+         monthly_r = tr_index / lag(tr_index) - 1,
+         cum_r = tr_index / first(tr_index) - 1)
+
+head(monthly_sp500_tr_index)
+```
+
+d-3. Merges two cumulative return indices, by month
+```{r, warning=FALSE, message=FALSE}
+rshiller_tr_index_merged <- rshiller_1988 |>
+  left_join(monthly_sp500_tr_index, by = "year_month") |>
+  rename(
+    cum_r_rshiller = cum_tr,
+    cum_r_tr_index = cum_r,
+    monthly_r_rshiller = monthly_tr,
+    monthly_r_tr_index = monthly_r
+  )
+
+head(rshiller_tr_index_merged)
+```
+
+d-4. Constructs time series of compounded returns, plots comparison graph
+```{r, warning=FALSE, message=FALSE}
+library(xts)
+library(zoo)
+
+cum_r_rshiller_1988_xts <- xts(rshiller_tr_index_merged$cum_r_rshiller, order.by =
+                            rshiller_tr_index_merged$year_month)
+cum_r_tr_index_xts <- xts(rshiller_tr_index_merged$cum_r_tr_index, order.by = 
+                            rshiller_tr_index_merged$year_month)
+
+cum_r_1988_xts_merged <- merge(cum_r_rshiller_1988_xts, cum_r_tr_index_xts, all = TRUE)
+
+# Plots time series in comparison
+plot.xts(cum_r_1988_xts_merged, main = "Cumulative Returns Over Time", ylab = "Cumulative Return",
+         xlab = "Date", col = c("red", "black"))
+addLegend("topleft", legend.names = c("Shiller Data", "Yahoo Finance TR Index"), 
+          col = c("red", "black"), lty = 1, lwd = 2)
+```
+Shiller data and Yahoo Finance data seem to closely track each others movement. Following possibilities that explain this difference: 1. Selecting only the closing price of last day of each month for Yahoo Finance SP500 data 2. Approximating monthly dividends using Shiller's data
+
+d-5. Reports Pearson and Spearman correlations
+```{r, warning=FALSE, message=FALSE}
+pearson_corr <- cor(rshiller_tr_index_merged$cum_r_rshiller, 
+                    rshiller_tr_index_merged$cum_r_tr_index, 
+                    method = "pearson", use = "complete.obs")
+
+spearman_corr <- cor(rshiller_tr_index_merged$cum_r_rshiller, 
+                     rshiller_tr_index_merged$cum_r_tr_index, 
+                     method = "spearman", use = "complete.obs")
+
+cat("Pearson Correlation:", pearson_corr, "\n")
+cat("Spearman Correlation:", spearman_corr, "\n")
+```
+
+e-1. Calculates cumulative returns since 1928 using Shiller data
+```{r, warning=FALSE, message=FALSE}
+rshiller_1928 <- rshiller |>
+  filter(date >= "1928-01-01") |>
+  mutate(cum_tr = cumprod(1 + monthly_tr) - 1,
+         year_month = floor_date(date, "month")) |>
+  select(date, year_month, monthly_tr, cum_tr)
+
+head(rshiller_1928)
+```
+
+e-2. Calculates cumulative unadjusted returns from 1928 to 2023 using Yahoo Finance SP500 price index data
+```{r, warning=FALSE, message=FALSE}
+sp500_price_index <- tq_get("^GSPC", get = "stock.prices",
+                            from = "1928-01-01", to = "2023-12-31") |>
+  select(date, pr_index = close) |>
+  drop_na()
+
+monthly_sp500_price_index <- sp500_price_index |>
+  mutate(year = year(date), month = month(date)) |>
+  group_by(year, month) |> 
+  filter(date == max(date)) |>
+  ungroup() |>
+  select(-year, -month) |>
+  mutate(year_month = floor_date(date, "month"),
+         monthly_r_unadjusted = pr_index / lag(pr_index) - 1,
+         cum_r_unadjusted = pr_index / first(pr_index) - 1)
+
+head(monthly_sp500_price_index)
+```
+
+
+e-3. Merges two cumulative return indices, by month
+```{r, warning=FALSE, message=FALSE}
+rshiller_price_index_merged <- rshiller_1928 |>
+  left_join(monthly_sp500_price_index, by = "year_month") |>
+   rename(
+     cum_r_rshiller = cum_tr,
+     monthly_r_rshiller = monthly_tr,
+   )
+
+head(rshiller_price_index_merged)
+```
+
+e-4. Creates xts objects and comparison graphics
+```{r, warning=FALSE, message=FALSE}
+cum_r_rshiller_1928_xts <- xts(rshiller_price_index_merged$cum_r_rshiller, order.by =
+                            rshiller_price_index_merged$year_month)
+cum_r_unadjusted_xts <- xts(rshiller_price_index_merged$cum_r_unadjusted, order.by = 
+                            rshiller_price_index_merged$year_month)
+
+cum_r_1928_xts_merged <- merge(cum_r_rshiller_1928_xts, cum_r_unadjusted_xts, all = TRUE)
+
+plot.xts(cum_r_1928_xts_merged, main = "Cumulative Returns Over Time", ylab = "Cumulative Return",
+         xlab = "Date", col = c("red", "black"))
+addLegend("topleft", legend.names = c("Shiller Data", "Yahoo Finance Price Index"), 
+          col = c("red", "black"), lty = 1, lwd = 2)
+```
+
+e-5. Reports metrics - average, standard deviation of the monthly adjusted and unadjusted returns
+```{r, warning=FALSE, message=FALSE}
+avg_sd_report <- rshiller_price_index_merged |>
+  summarize(
+    avg_r_rshiller_adjusted = mean(monthly_r_rshiller, na.rm= TRUE),
+    sd_r_rshiller_adjusted = sd(monthly_r_rshiller, na.rm= TRUE),
+    avg_r_unadjusted = mean(monthly_r_unadjusted, na.rm= TRUE),
+    sd_r_unadjusted = sd(monthly_r_unadjusted, na.rm= TRUE)
+  )
+
+summary_table <- matrix(c(avg_sd_report$avg_r_rshiller_adjusted, 
+                          avg_sd_report$sd_r_rshiller_adjusted,
+                          avg_sd_report$avg_r_unadjusted,
+                          avg_sd_report$sd_r_unadjusted),
+                        nrow = 2)
+
+rownames(summary_table) <- c("Average", "Standard Deviation")
+colnames(summary_table) <- c("R.Shiller Adjusted", "Unadjusted")
+
+print(summary_table)
+```
+It can be observed that Shiller's data presents a lower standard deviation for the monthly return, suggesting that the unadjusted data has a higher volatility. This could possibly be explained by the way that dividends are included in this adjusted data, which in comparison to the unadjusted monthly return, mitigating some level of volatility. The higher average monthly adjusted return can be explained by the inclusion of dividends.
+
+
+f-1. Extracts rf and rme data from French's data library
+```{r, warning=FALSE, message=FALSE}
+library(frenchdata)
+ff3 <- download_french_data("Fama/French 3 Factors")
+ff3 <- ff3$subsets$data[[1]] |>
+  mutate(
+    date = floor_date(ymd(str_c(date, "01")), "month"),
+    across(c(RF, `Mkt-RF`, SMB, HML), ~as.numeric(.) / 100),
+    .keep = "none") |>
+  rename_with(str_to_lower) |>
+  rename(rme = `mkt-rf`) |>
+  select(date,rf,rme) |>
+  filter(date <= ymd("2023-12-31"))
+
+head(ff3)
+```
+
+f-2. Calculates SP500 monthly total excess returns, merges with French's data. Calculates cumulative excess returns
+```{r, warning=FALSE, message=FALSE}
+monthly_sp500_excess_returns <- ff3 |>
+  mutate(year_month = floor_date(date, "month"),
+         year = year(date), month = month(date)) |>
+  left_join(rshiller_price_index_merged, by = "year_month") |>
+  drop_na() |>
+  mutate(monthly_xr = monthly_r_rshiller - rf,
+        cum_xr = cumprod(1 + monthly_xr) - 1,
+        cum_rme = cumprod(1 + rme) - 1)
+
+head(monthly_sp500_excess_returns)
+```
+
+f-3. Plots the cumulative excess returns of the SP500 total index
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+
+ggplot(monthly_sp500_excess_returns, aes(x = as.Date(paste(year, month, "01", sep = "-")), group = 1)) +
+  geom_line(aes(y = cum_xr, color = "Cumulative Excess Return")) +
+  labs(title = "Cumulative Excess Returns, SP500 Total Index (1928 - 2023)",
+       x = "Date",
+       y = "Cumulative Excess Return") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+f-4. Identifies 5 longest downturns in duration, along with time of recovery
+```{r, warning=FALSE, message=FALSE}
+library(PerformanceAnalytics)
+xr_xts <- xts(monthly_sp500_excess_returns$monthly_xr, 
+                   order.by = monthly_sp500_excess_returns$year_month)
+
+drawdowns <- Drawdowns(xr_xts)
+
+top_drawdowns <- table.Drawdowns(xr_xts)
+top_drawdowns_by_length <- top_drawdowns[order(top_drawdowns$`To Trough`, decreasing = TRUE), ]
+
+top_5_drawdowns_by_length <- top_drawdowns_by_length[1:5,]
+print(top_5_drawdowns_by_length)
+#print(top_drawdowns)
+```
+(1). 2000-09-01(peak) to 2009-03-01(trough) to 2013-02-01(recovery), Dot-Com Bubble crisis. Downturn duration 103 months, recovery time 47 months.
+
+(2). 1929-10-01(peak)	to 1932-06-01(trough)	to 1945-04-01(recovery), Great Depression. Downturn duration 33 months, recovery time 154 months.
+
+(3). 1973-02-01	(peak)	to 1974-12-01(trough)	to 1985-06-01(recovery), Oil Crisis & stagflation. Downturn duration 23 months, recovery time 126 months.
+
+(4). 1969-01-01	(peak)	to 1970-06-01(trough)	to 1972-11-01	(recovery), Late 60s Recession & stagflation. Downturn duration 18 months, recovery time 29 months.
+
+(5). 1987-09-01(peak)	to 1987-12-01(trough)	to 1991-04-01(recovery), Black Monday. Downturn duration 4 months, recovery time 40 months.
+
+g-1. Reports Pearson and Spearman correlations
+```{r, warning=FALSE, message=FALSE}
+pearson_corr_xr <- cor(monthly_sp500_excess_returns$monthly_xr, 
+                    monthly_sp500_excess_returns$rme, 
+                    method = "pearson", use = "complete.obs")
+
+# Calculate Spearman correlation
+spearman_corr_xr <- cor(monthly_sp500_excess_returns$monthly_xr, 
+                     monthly_sp500_excess_returns$rme, 
+                     method = "spearman", use = "complete.obs")
+
+# Print the correlations
+cat("Pearson Correlation:", pearson_corr_xr, "\n")
+cat("Spearman Correlation:", spearman_corr_xr, "\n")
+```
+
+g-2. Plots time series of cumulative excess returns for the two indices
+```{r, warning=FALSE, message=FALSE}
+cum_xr_xts <- xts(monthly_sp500_excess_returns$cum_xr, order.by =
+                            monthly_sp500_excess_returns$year_month)
+cum_rme_xts <- xts(monthly_sp500_excess_returns$cum_rme, order.by = 
+                            monthly_sp500_excess_returns$year_month)
+
+cum_xr_xts_merged <- merge(cum_xr_xts, cum_rme_xts, all = TRUE)
+
+plot.xts(cum_xr_xts_merged, main = "Cumulative Excess Returns Over Time", ylab = "Cumulative Excess Return",
+         xlab = "Date", col = c("red", "black"))
+addLegend("topleft", legend.names = c("Shiller Excess Return", "French RME"), 
+          col = c("red", "black"), lty = 1, lwd = 2)
+```
+
+h. Identifies 3 longest downturns in duration, along with time of recovery
+```{r, warning=FALSE, message=FALSE}
+top_3_drawdowns_by_length <- top_drawdowns_by_length[1:3, ]
+print(top_3_drawdowns_by_length)
+```
+(1). 2000-09-01(peak) to 2009-03-01(trough) to 2013-02-01(recovery), Dot-Com Bubble crisis. Downturn duration 103 months, recovery time 47 months.
+
+(2). 1929-10-01(peak)	to 1932-06-01(trough)	to 1945-04-01(recovery), Great Depression. Downturn duration 33 months, recovery time 154 months.
+
+(3). 1973-02-01	(peak)	to 1974-12-01(trough)	to 1985-06-01(recovery), Oil Crisis & stagflation. Downturn duration 23 months, recovery time 126 months.
+
+
+
