@@ -1,0 +1,1 @@
+Group projects relating to empircal finance can be found here. Each .rmd and .qmd has a corresponding .pdf for easy viewing purposes. The project details and instructions can also be found in .pdf form.
